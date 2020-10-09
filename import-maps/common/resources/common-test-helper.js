@@ -1,5 +1,27 @@
 setup({allow_uncaught_exception : true});
 
+// Set window.useInternalMethods = true when needed && available.
+
+let registration;
+const scope = './scope/';
+
+// Global setup: this must be the first promise_test.
+promise_test(async (t) => {
+  const script = 'common-test-service-worker.js';
+
+  registration =
+      await service_worker_unregister_and_register(t, script, scope);
+  window.worker = registration.installing;
+  await wait_for_state(t, window.worker, 'activated');
+}, 'global setup');
+
+export function setupGlobalCleanup() {
+  // Global cleanup: the final promise_test.
+  promise_test(() => {
+     return registration.unregister();
+  }, 'global cleanup');
+}
+
 // Creates a new Document (via <iframe>) and add an inline import map.
 function parse(importMap, importMapBaseURL) {
   return new Promise(resolve => {
@@ -15,79 +37,154 @@ function parse(importMap, importMapBaseURL) {
       {once: true});
 
     const testHTML = `
+      <body>
       <script>
       // Handle errors around fetching, parsing and registering import maps.
-      let registrationResult;
       const onScriptError = event => {
-        registrationResult = {type: 'FetchError', error: event.error};
+        window.registrationResult = {type: 'FetchError', error: event.error};
         return false;
       };
-      const windowErrorHandler = event => {
-        registrationResult = {type: 'ParseError', error: event.error};
+      window.windowErrorHandler = event => {
+        window.registrationResult = {type: 'ParseError', error: event.error};
         return false;
       };
-      window.addEventListener('error', windowErrorHandler);
-      window.addEventListener('load', event => {
-        if (!registrationResult) {
-          registrationResult = {type: 'Success'};
-        }
-        window.removeEventListener('error', windowErrorHandler);
-        parent.postMessage(registrationResult, '*');
-      });
+      window.addEventListener('error', window.windowErrorHandler);
 
       // Handle specifier resolution requests from the parent frame.
+      // For failures, we post error names and messages instead of error
+      // objects themselves and re-create error objects later, to avoid
+      // issues around serializing error objects which is a quite new feature.
       window.addEventListener('message', event => {
-        try {
-          if (event.data.action === 'resolve') {
-            // URL resolution is tested using Chromium's internals.
-            // TODO(hiroshige): Remove the Chromium-specific dependency.
-            const result = internals.resolveModuleSpecifier(
+        if (event.data.action === 'prepareResolve') {
+          // To get the result of #resolve-a-module-specifier given a script
+          // (with base URL = |baseURL|) and |specifier|, the service worker
+          // first serves an importer script with response URL = |baseURL|:
+          //     window.importHelper = (specifier) => import(specifier);
+          // This is to use |baseURL| as the referringScript's base URL.
+
+          // Step 1. Signal the service worker to serve
+          // the importer script for the next fetch request.
+          parent.worker.postMessage('serveImporterScript');
+        } else if (event.data.action === 'resolve') {
+          if (event.data.expectedURL === null ||
+              new URL(event.data.expectedURL).protocol === 'https:') {
+            // Testing without internal methods:
+            // If the resolution is expected to fail (null case here),
+            // we can test the failure just by catching the exception.
+            // If the expected URL is HTTPS, we can test the result by
+            // intercepting requests by service workers.
+
+            // Step 3. Evaluate the importer script as a classic script,
+            // in order to prevent |baseURL| from being mapped by import maps.
+            const script = document.createElement('script');
+            script.onload = () => {
+              // Step 4. Trigger dynamic import from |baseURL|.
+              importHelper(event.data.specifier)
+                .then(module => {
+                    // Step 5. Service worker responds with a JSON containing
+                    // the request URL for the dynamic import
+                    // (= the result of #resolve-a-module-specifier).
+                    parent.postMessage({type: 'ResolutionSuccess',
+                                        result: module.response.url},
+                                       '*');
+                  })
+                .catch(e => {
+                    parent.postMessage(
+                        {type: 'Failure', result: e.name, message: e.message},
+                        '*');
+                  });
+            };
+            script.src = event.data.baseURL;
+            document.body.appendChild(script);
+          } else {
+            // Testing with internal methods.
+            // For example, the resolution results are data: URLs.
+            if (!event.data.useInternalMethods) {
+              parent.postMessage(
+                  {type: 'Failure',
+                   result: 'internals.resolveModuleSpecifier is not available'},
+                  '*');
+              return;
+            }
+            try {
+              const result = internals.resolveModuleSpecifier(
                 event.data.specifier,
                 event.data.baseURL,
                 document);
-            parent.postMessage({type: 'ResolutionSuccess', result: result}, '*');
-         } else if (event.data.action === 'getParsedImportMap') {
-           parent.postMessage({
-               type: 'GetParsedImportMapSuccess',
-               result: internals.getParsedImportMap(document)}, '*');
-         } else {
-           parent.postMessage({
-               type: 'Failure',
-               result: "Invalid Action: " + event.data.action}, '*');
-         }
-        } catch (e) {
-          // We post error names instead of error objects themselves and
-          // re-create error objects later, to avoid issues around serializing
-          // error objects which is a quite new feature.
-          parent.postMessage({type: 'Failure', result: e.name}, '*');
+              parent.postMessage(
+                  {type: 'ResolutionSuccess', result: result}, '*');
+            } catch (e) {
+              parent.postMessage(
+                  {type: 'Failure', result: e.name, message: e.message}, '*');
+            }
+          }
+        } else if (event.data.action === 'getParsedImportMap') {
+          if (!event.data.useInternalMethods) {
+            parent.postMessage(
+                {type: 'Failure',
+                 result: 'Error',
+                 result: 'internals.getParsedImportMap is not available'},
+                '*');
+          }
+          try {
+            parent.postMessage({
+                type: 'GetParsedImportMapSuccess',
+                result: internals.getParsedImportMap(document)}, '*');
+          } catch (e) {
+            parent.postMessage(
+                {type: 'Failure', result: e.name, message: e.message}, '*');
+          }
+        } else {
+          parent.postMessage({
+              type: 'Failure',
+              result: 'Error',
+              message: 'Invalid Action: ' + event.data.action}, '*');
         }
       });
       </script>
       <script type="importmap" onerror="onScriptError(event)">
       ${importMapString}
       </script>
+      <script type="module">
+        if (!window.registrationResult) {
+          window.registrationResult = {type: 'Success'};
+        }
+        window.removeEventListener('error', window.windowErrorHandler);
+        parent.postMessage(window.registrationResult, '*');
+      </script>
+      </body>
     `;
 
     if (new URL(importMapBaseURL).protocol === 'data:') {
+      if (!window.useInternalMethods) {
+        throw new Error(
+            'Import maps with base URL = data: URL requires internal methods');
+      }
       iframe.src = 'data:text/html;base64,' + btoa(testHTML);
     } else {
-      iframe.srcdoc = `<base href="${importMapBaseURL}">` + testHTML;
+      // Set the src to `scope` in order to make requests from `iframe`
+      // intercepted by the service worker.
+      iframe.src = scope;
+      iframe.onload = () => {
+        iframe.contentDocument.write(
+            `<base href="${importMapBaseURL}">` + testHTML);
+        iframe.contentDocument.close();
+      };
     }
-
     document.body.appendChild(iframe);
-
   });
 }
 
 // Returns a promise that is resolved with the resulting URL.
-function resolve(specifier, parsedImportMap, baseURL) {
+// `expectedURL` is a string, or null if to be thrown.
+function resolve(specifier, parsedImportMap, baseURL, expectedURL) {
   return new Promise((resolve, reject) => {
     window.addEventListener('message', event => {
         if (event.data.type === 'ResolutionSuccess') {
           resolve(event.data.result);
         } else if (event.data.type === 'Failure') {
           if (event.data.result === 'TypeError') {
-            reject(new TypeError());
+            reject(new TypeError(event.data.message));
           } else {
             reject(new Error(event.data.result));
           }
@@ -97,8 +194,20 @@ function resolve(specifier, parsedImportMap, baseURL) {
       },
       {once: true});
 
-    parsedImportMap.contentWindow.postMessage(
-        {action: "resolve", specifier: specifier, baseURL: baseURL}, '*');
+    parsedImportMap.contentWindow.postMessage({action: "prepareResolve"}, '*');
+
+    navigator.serviceWorker.addEventListener('message', event => {
+      // Step 2. After postMessage() at Step 1 is processed, the service worker
+      // sends back a message and the parent Window receives the message here
+      // and sends a 'resolve' message to the iframe.
+      parsedImportMap.contentWindow.postMessage(
+          {action: "resolve",
+           specifier: specifier,
+           baseURL: baseURL,
+           expectedURL: expectedURL,
+           useInternalMethods: window.useInternalMethods},
+          '*');
+    }, {once: true});
   });
 }
 
@@ -112,7 +221,8 @@ function getParsedImportMap(parsedImportMap) {
       {once: true});
 
     parsedImportMap.contentWindow.postMessage(
-        {action: "getParsedImportMap"}, '*');
+        {action: "getParsedImportMap",
+         useInternalMethods: window.useInternalMethods}, '*');
   });
 }
 
@@ -191,11 +301,11 @@ async function runTests(j) {
         promise_test(async t => {
             if (expected === null) {
               return promise_rejects_js(t, TypeError,
-                  resolve(specifier, j.parsedImportMap, j.baseURL));
+                  resolve(specifier, j.parsedImportMap, j.baseURL, null));
             } else {
               // Should be resolved to `expected`.
               const actual = await resolve(
-                  specifier, j.parsedImportMap, j.baseURL);
+                  specifier, j.parsedImportMap, j.baseURL, expected);
               assert_equals(actual, expected);
             }
           },
