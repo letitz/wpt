@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<title>Service Worker: Static imports from module top-level scripts shouldn't be affected by scope</title>
+<script src="/resources/testharness.js"></script>
+<script src="/resources/testharnessreport.js"></script>
+<script src="resources/test-helpers.sub.js"></script>
+<script>
+promise_test(function(t) {
+    const script = 'resources/scope1/module-worker-importing-scope2.js';
+    const scope = 'resources/scope1/';
+    const script_url = new URL(script, location.href);
+    const expected_scope = new URL('./', script_url).href;
+    return service_worker_unregister(t, expected_scope)
+      .then(function() {
+        return navigator.serviceWorker.register(script, {type: 'module'});
+      }).then(function(registration) {
+        assert_equals(registration.scope, expected_scope,
+                      'The default scope should be URL("./", script_url)');
+        return registration.unregister();
+      }).then(function() {
+        t.done();
+      });
+  }, 'static imports to outside scope should be allowed');
+
+promise_test(function(t) {
+    const script = 'resources/scope1/module-worker-importing-redirect-to-scope2.js';
+    const scope = 'resources/scope1/';
+    const script_url = new URL(script, location.href);
+    const expected_scope = new URL('./', script_url).href;
+    return service_worker_unregister(t, expected_scope)
+      .then(function() {
+        return navigator.serviceWorker.register(script, {type: 'module'});
+      }).then(function(registration) {
+        assert_equals(registration.scope, expected_scope,
+                      'The default scope should be URL("./", script_url)');
+        return registration.unregister();
+      }).then(function() {
+        t.done();
+      });
+  }, 'static imports redirecting to outside scope should be allowed');
+</script>
