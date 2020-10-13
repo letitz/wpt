@@ -694,6 +694,10 @@ LAYOUTTESTS APIS: import-maps/common/resources/common-test-helper.js
 LAYOUTTESTS APIS: resources/chromium/enable-hyperlink-auditing.js
 LAYOUTTESTS APIS: resources/chromium/generic_sensor_mocks.js
 LAYOUTTESTS APIS: resources/chromium/webxr-test.js
+LAYOUTTESTS APIS: web-nfc/NDEFReader-read-document-hidden-manual.https.html
+LAYOUTTESTS APIS: web-nfc/NDEFReader-write-document-hidden-manual.https.html
+LAYOUTTESTS APIS: web-nfc/NDEFReader_scan.https.html
+LAYOUTTESTS APIS: web-nfc/NDEFReader_write.https.html
 LAYOUTTESTS APIS: webxr/resources/webxr_util.js
 
 # Signed Exchange files have hard-coded URLs in the certUrl field
